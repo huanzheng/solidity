@@ -1,0 +1,275 @@
+实操UniswapV2
+
+本文通过设计场景，实际运行UniswapV2，观察UniswapV2内部数据，结合UniswapV2实际代码，把实际结果和理论结果对应起来，从而达到深入了解其内部算法实际实现的目的。
+本文仅涉及最基本的addLiquidity/swapExactTokensForTokens/removeLiquidity；其他的接口本质上类似，有兴趣的可以自行继续钻研。
+
+在开始前，几点体会：
+1，Uniswap protocol，逻辑上极其简单，但玩法/数学上相对复杂。逻辑上的简单，保证了执行代码简单，从而保证了在区块链上的可运行性，执行时不会run out of gas。玩法/数学的相对复杂，有一定理论支撑，保证了随着游戏的进行，系统状态的可预测性，可持续发展性。
+2，Uniswap的玩法，实际上可以抽取出来，用普通的程序进行模拟运行；
+3，任何一个DApp protocol，在设计玩法时，模拟是很重要的，可以帮助迅速测试可玩性，以及算法的合理性。
+
+Uniswap最基本的运行环境需要如下几个Contract.
+1, ERC20 Token A : 最基础的ERC20，在此场景里扮演swap的角色；不属于Uniswap protocol
+2, ERC20 Token B : 最基础的ERC20，在此场景里扮演swap的角色；不属于Uniswap protocol
+3, UniswapV2Pair : Uniswap用来做最终swap的contract，每一对swap都有且只有一个UniswapV2Pair；属于Uniswap protocol的core部分
+4, UniswapV2Factory : Uniswap用来管理UniswapV2Pair的contract，包括创建/查询UniswapV2Pair；属于Uniswap protocol的core部分
+5, UniswapV2Router02 : Uniswap用来做计算以及查路由的contract，包括swap的量，fee，reserve等等；属于Uniswap protocol的periphery部分
+注意下，UniswapV2Router02 这个contract，内部不包含任何数据，只是用来做计算以及查路由的，算是外围打辅助的角色；
+Uniswap的实现设计成这样的好处是，可以方便的替换这部分算法而不影响所有用户的数据。
+
+本场景的Contract的Deploy顺序如下：
+1, Deploy ERC20 Token A
+2, Deploy ERC20 Token B
+3, Deploy UniswapV2Factory
+4, Deploy UniswapV2Router02
+Deploy Token A/B的目的是创建需要Swap的对象；A/B的总量都是1000000；并且mint在User1的名下
+Deploy UniswapV2Factory的目的是给Deploy UniswapV2Router02创造前提条件，因为UniswapV2Router02在deploy时，需要一个UniswapV2Factory作为输入。
+Deploy UniswapV2Router02的目的是创建Uniswap对外的接口；因为Uniswap的所有操作，都是通过UniswapV2Router02暴露出去的。
+
+本场景的设计流程如下：
+1, User1 addLiquidity 20000A, 200B
+2, User1 swap 10B for some A
+3, User2 addLiquidity 20000A, 200B
+4, User2 swap 10B for some A
+5, User2 removeLiquidity
+
+本场景各个角色的地址如下
+注意：本场景的运行是在Remix IDE里，Contract以及User的地址在其他机器上肯定不一样，但为了描述的准确性和完整性，所有参与者的地址都会被列出
+1, ERC20 Token A : 0xd9145CCE52D386f254917e481eB44e9943F39138
+2, ERC20 Token B : 0xd8b934580fcE35a11B58C6D73aDeE468a2833fa8
+3, UniswapV2Pair : 0x6691f2FffF8e6D0dF1A3Ac214b780FD42c45bcE1
+4, UniswapV2Factory : 0xD7ACd2a9FD159E69Bb102A1ca21C9a3e3A5F771B
+5, UniswapV2Router02 : 0x7EF2e0048f5bAeDe046f6BF797943daF4ED8CB47
+6, User1 : 0x5B38Da6a701c568545dCfcB03FcB875f56beddC4
+7, User2 : 0xAb8483F64d9C6d1EcF9b849Ae677dD3315835cb2
+
+现在正式开始：
+一，User1 addLiquidity 20000A, 200B
+addLiquidity的ABI如下：
+address tokenA, address tokenB, uint amountADesired, uint amountBDesired, uint amountAMin, uint amountBMin, address to, uint deadline
+
+理论效果：
+想增加A/B Pair（可以别称Pool）的流动性，虽然我们提供了amountADesired, amountBDesired；但是真正会进去Pool的量，是根据这个pool里头当前A/B的reserved的比例，从amountADesired,amountBDesired拿一部分进去的。
+但是由于这是第一次往一个Pair里头增加流动性，并不存在一个已有比例，所以amountADesired,amountBDesired的流动性，都会被Pool接受。相应代码如下
+        (uint reserveA, uint reserveB) = UniswapV2Library.getReserves(factory, tokenA, tokenB);
+        if (reserveA == 0 && reserveB == 0) {
+            (amountA, amountB) = (amountADesired, amountBDesired);
+接受了流动性后，会给to这个address返回liquidity(本质上是这个A/B Pair的ERC20 balance)，也就是凭证，日后Liquidity Provider在removeLiquidity的时候，可以根据这个凭证去取回Pool里相应比例的Token A/B
+关于liquidity的计算，是在UniswapV2Pair里面；由于是第一次，totalSupply是0，相应代码如下：
+        if (_totalSupply == 0) {
+            liquidity = Math.sqrt(amount0.mul(amount1)).sub(MINIMUM_LIQUIDITY);
+           _mint(address(0), MINIMUM_LIQUIDITY); // permanently lock the first MINIMUM_LIQUIDITY tokens
+可以看到两点，1, liquidity的计算方式；2，会往address0 mint一个MINIMUM_LIQUIDITY，很奇怪，这是whitepaper里头定义的，有空可以深究下
+我们来算下理论liquidity，MINIMUM_LIQUIDITY是1000，sqrt(20000*200)-1000=1000
+
+对于第一步，总结下；User1想提供流动性，20000个A，200个B；最终20000A，200B都会被接受，并且返给User1 1000个liquidity；然而总liquidity是2000(由于烧给address(0) 1000个liquidity)
+
+实操参数如下：
+0xd9145CCE52D386f254917e481eB44e9943F39138,0xd8b934580fcE35a11B58C6D73aDeE468a2833fa8,20000,200,20000,200,0x5B38Da6a701c568545dCfcB03FcB875f56beddC4,2603868565
+实操后实际结果如下：
+1, User1 TokenA: 1000000->980000 少了20000
+2, User1 TokenB: 1000000->999800 少了200
+3, A/B Pair reserveA: 0->20000 多了20000
+4, A/B Pair reserveB: 0->200 多了200
+5, A/B Pair totalSupply: 0->2000 多了2000
+6, A/B Pair User1 liquidity: 0->1000 多了1000
+
+二，User1 swap 10B for some A
+swapExactTokensForTokens的ABI如下：
+uint amountIn,uint amountOutMin, address[] calldata path, address to, uint deadline
+
+理论效果：
+User1的B会少10个，至于A会多出来多少个，咱们得算一算。
+根据protocol，swap完后，K是不会变的；
+先假设没有fee，咱们算一下
+reserveIn*reserveOut = (reserveIn+amountIn)*(reserveOut-amountOut)
+amountOut = reserveOut - (reserveIn*reserveOut)/(reserveIn+amountIn)
+amountOut = (reserveOut*amountIn)/(reserveIn+amountIn)
+当前场景下 reserveIn:200 reserveOut:20000 amountIn:10，代入计算下amountOut = (20000*10)/(200+10) = 952
+所以，如果没有fee，10个B可以换952个A
+
+但是，protocol规定了0.3%的fee，所以amountIn是在原始基础上打个折来算的，公式如下
+reserveIn*reserveOut = (reserveIn+amountIn*99.7%)*(reserveOut-amountOut)
+amountOut = (reserveOut*amountIn*99.7%)/(reserveIn+amountIn*99.7%)
+amountOut = (reserveOut*amountIn*997)/(reserveIn*1000+amountIn*997)
+代入 amountOut = (20000*10*997)/(200*1000+10*997) = 949
+因此，扣去0.3%的fee后，实际可以换出的A的量是949个
+
+实际代码如下：
+        uint amountInWithFee = amountIn.mul(997);
+        uint numerator = amountInWithFee.mul(reserveOut);
+        uint denominator = reserveIn.mul(1000).add(amountInWithFee);
+        amountOut = numerator / denominator;
+
+对于第二步，总结下： User1 想用10个B换一些A，Uniswap帮助算出来可以换949个A
+
+实操参数如下：
+10,900,["0xd8b934580fcE35a11B58C6D73aDeE468a2833fa8","0xd9145CCE52D386f254917e481eB44e9943F39138"],0x5B38Da6a701c568545dCfcB03FcB875f56beddC4,2603868565
+实操后实际结果如下：
+1, User1 TokenA: 980000->980949	多了949
+2, User1 TokenB: 999800->999790 少了10
+3, A/B Pair reserveA: 20000->19051 少了949
+4, A/B Pair reserveB: 200->210 多了10
+5, A/B Pair totalSupply: 2000 没变
+6, A/B Pair User1 liquidity: 1000 没变
+
+注意：这时的K=19051*210=4000710是大于20000*200的，这是因为fee的存在而导致的。
+
+
+三，User2 addLiquidity 20000A, 200B
+在进行第三步之前，得从User1给User2转点A/B Token，不然它没钱
+User1转给User2, A/B各100000，转钱完毕后
+1, User2 TokenA: 0->100000 多了100000
+2, User2 TokenB: 0->100000 多了100000
+3, User1 TokenA: 980949->880949 少了100000
+4, User1 TokenB: 999790->899790 少了100000
+5, A/B Pair reserveA: 19051 没变
+6, A/B Pair reserveB: 210 没变
+7, A/B Pair totalSupply: 2000 没变
+8, A/B Pair User1 liquidity: 1000 没变
+
+现在User2有钱了，正式开始。
+addLiquidity的ABI如下：
+address tokenA, address tokenB, uint amountADesired, uint amountBDesired, uint amountAMin, uint amountBMin, address to, uint deadline
+
+理论效果：
+A/B Pair的流动性会增加，至于增加多少，咱们得算一算
+前面提到过，想给 A/B Pair增加amountADesired,amountBDesired，但是Pool能接受多少，是根据Pool里头当前A/B的比例来进行计算的。
+User2想提供20000A，200B，而当前Pool里面reservedA是19051，reservedB是210；
+如果Pool想保持比例接受所有的20000个A，那么应该同时接受，20000x210/19051=220个B，但是可以提供的B没有那么多，因此应该是把200个B全部接受，按比例接受200x19051/210=18143个A
+相关代码如下
+        uint amountBOptimal = UniswapV2Library.quote(amountADesired, reserveA, reserveB);
+        if (amountBOptimal <= amountBDesired) {
+            require(amountBOptimal >= amountBMin, 'UniswapV2Router: INSUFFICIENT_B_AMOUNT');
+            (amountA, amountB) = (amountADesired, amountBOptimal);
+        } else {
+            uint amountAOptimal = UniswapV2Library.quote(amountBDesired, reserveB, reserveA);
+            assert(amountAOptimal <= amountADesired);
+            require(amountAOptimal >= amountAMin, 'UniswapV2Router: INSUFFICIENT_A_AMOUNT');
+            (amountA, amountB) = (amountAOptimal, amountBDesired);
+        }
+
+        function quote(uint amountA, uint reserveA, uint reserveB) public view returns (uint amountB) {
+            require(amountA > 0, 'UniswapV2Library: INSUFFICIENT_AMOUNT');
+            require(reserveA > 0 && reserveB > 0, 'UniswapV2Library: INSUFFICIENT_LIQUIDITY');
+            amountB = amountA.mul(reserveB) / reserveA;
+        }
+所以，User2这次可以提供进去的流动性是18143个A，200个B，那么User2这次应该得到多少liquidity凭证呢？我们来算一算
+得到多少凭证是根据这次提供的流动性的大小和当前Pool里头流动性的总大小的比例，乘以当前Pool的总liquidity(totalSupply)来计算的。
+当前Pool的totalSupply是2000；代入计算 2000*200/210=1904
+相关代码如下
+        liquidity = Math.min(amount0.mul(_totalSupply) / _reserve0, amount1.mul(_totalSupply) / _reserve1);
+
+对于第三步，总结下：User2想提供流动性20000A，200B，实际提供进去18143A，200B，然后得到的liquidity凭证数量是1904
+
+实操参数如下：
+0xd9145CCE52D386f254917e481eB44e9943F39138,0xd8b934580fcE35a11B58C6D73aDeE468a2833fa8,20000,200,10000,100,0xAb8483F64d9C6d1EcF9b849Ae677dD3315835cb2,2603868565
+实操后实际结果如下：
+1, User2 TokenA: 100000->81857 少了18143
+2, User2 TokenB: 100000->99800 少了200
+3, User1 TokenA: 880949 没变
+4, User1 TokenB: 899790 没变
+5, A/B Pair reserveA: 19051->37194 多了18143
+6, A/B Pair reserveB: 210->410 多了200
+7, A/B Pair totalSupply: 2000->3904 多了1904
+8, A/B Pair User1 liquidity: 1000 没变
+9, A/B Pair User2 liquidity: 0->1904 多了1904
+注意到没，User1作为第一个提供流动性的人，虽然增加的流动性跟User2差不多，但是占这个Pool的比例却没有User2多；这是因为协议里，第一笔liquidity，要mint 1000个单位到address(0)导致的
+同时我们也发现，除去第一个倒霉蛋，越早进去提供流动性越好，因为手续费的积累，并不会降低你占Pool的比例；随着手续费的积累，越往后，提供同样的流动性，占Pool的比例会越来越低；手续费，就是liquidity Token价值的来源。
+
+四，User2 swap 10B for some A
+这时User2，再想去swap10个B变成A，会怎样呢？这一步，整个代码流程跟第二步是一样，不再赘述
+直接上公式算能swap出多少A
+amountOut = (reserveOut*amountIn*997)/(reserveIn*1000+amountIn*997)
+amountOut = (37194*10*997)/(410*1000+10*997) = 882
+这次User2用10个B可以swap出882个A
+注意到没，现在10个B，可以换出来的A比User1第一次去换时能换出来949个A变少了；uniswap这时确实体现了供需影响价格的能力；因为大家都在抛售B，自然A会贵起来。
+
+实操参数如下：
+10,800,["0xd8b934580fcE35a11B58C6D73aDeE468a2833fa8","0xd9145CCE52D386f254917e481eB44e9943F39138"],0xAb8483F64d9C6d1EcF9b849Ae677dD3315835cb2,2603868565
+实操后实际结果如下：
+1, User2 TokenA: 81857->82739 多了882
+2, User2 TokenB: 99800->99790 少了10
+3, User1 TokenA: 880949 没变
+4, User1 TokenB: 899790 没变
+5, A/B Pair reserveA: 37194->36312 少了882
+6, A/B Pair reserveB: 410->420 多了10
+7, A/B Pair totalSupply: 3904 没变
+8, A/B Pair User1 liquidity: 1000 没变
+9, A/B Pair User2 liquidity: 1904 没变
+
+五，User2 removeLiquidity
+这次User2会将自己的全部的1904个liquidity全部remove掉，我们应该会观察到User2的 Token A B的余额会增加，Pool里头的reserveA reserveB会减少，至于数量多少，咱们得算一算。
+removeLiquidity会根据需要remove的liquidity占整个totalSupply的多少去计算返回多少Token A和B
+因此，会返还A的数量是 36312*1904/3904=17709 B的数量是 420*1904/3904=204
+
+相关代码如下：
+        amount0 = liquidity.mul(balance0) / _totalSupply; // using balances ensures pro-rata distribution
+        amount1 = liquidity.mul(balance1) / _totalSupply; // using balances ensures pro-rata distribution
+        require(amount0 > 0 && amount1 > 0, 'UniswapV2: INSUFFICIENT_LIQUIDITY_BURNED');
+        _burn(address(this), liquidity);
+        _safeTransfer(_token0, to, amount0);
+        _safeTransfer(_token1, to, amount1);
+对于第五步，总结下，User2要remove自己所有的liquidity，User2会得到17709个A，204个B，同时User2在Pair A/B里的liquidity会清0，总的totalSupply也会减少；
+
+实操参数如下：
+0xd9145CCE52D386f254917e481eB44e9943F39138,0xd8b934580fcE35a11B58C6D73aDeE468a2833fa8,1904,10000,200,0xAb8483F64d9C6d1EcF9b849Ae677dD3315835cb2,2603868565
+实操后实际结果如下：
+1, User2 TokenA: 82739->100448 多了17709
+2, User2 TokenB: 99790->99994 多了204
+3, User1 TokenA: 880949 没变
+4, User1 TokenB: 899790 没变
+5, A/B Pair reserveA: 36312->18603 少了17709
+6, A/B Pair reserveB: 420->216 少了204
+7, A/B Pair totalSupply: 3904->2000 少了1904
+8, A/B Pair User1 liquidity: 1000 没变
+9, A/B Pair User2 liquidity: 1904->0 少了1904
+
+至此典型的几个uniswap操作已经梳理完毕。
+
+回过头来，我们看看Liquidity Provider的impermenant loss
+在这个场景下，当初User2提供流动性时Pool里头的比例是
+reserveA:19051 reserveB:210
+撤回流动性时Pool里头的比例是
+reserveA:36312 reserveB:420
+User2当时提供的流动性是A:18143 B:200
+User2撤回流动性得到的  A:17709 B:204
+假设A为基本单位DAI，撤回流动性时，一个B的价格是36312/420=86.457A；那么按这个价格算，如果当时User2不去提供流动性，他现在的资产价格应该是18143+200*86.457=35434.4
+但是，实际上User2撤回流动性得到的资产价格是17709+204*86.457=35346.2
+也就是说，User2提供流动性实际最终是亏本的；这就是impermenant loss。
+
+其实理论上，我们可以算的出来，在没有手续费的前提下，只要提供流动性时，Pool里面资产的比例跟撤回流动性时不相等，就一定会有损失。
+而实际上，因为有手续费的存在，只要价格波动不大，手续费最终会弥补这个损失的。
+
+损失的公式是：impermanent_loss = 2*sqrt(price_ratio)/(1+price_ratio)—1
+price_ratio是撤回流动性时Pool里资产比例与提供流动性时Pool里资产比例的比值。
+根据这个公式，代入，可以看出，1.25的价格波动会带来0.6%的损失；1.5的价格波动会带来2%的损失。
+
+最后，我们来推一下这个公式。推理前提是没有手续费，那么K就是常量了。
+任意资产对A/B，选取任一作为计价单元，如选择B，那么一个B的价格就是B，而一个A的价格是r*B
+又因为价格是跟数量成反比的，那么假设A的数量是c，那么B的数量就是r*c
+又因为 c*r*c=K，所以c=sqrt(K/r)
+所以当Pool里面A/B价格比例是r1时，A的数量c1=sqrt(K/r1),B的数量则是K/sqrt(K/r1)=sqrt(K*r1)
+而当Pool里面A/B价格比例时r2时，A的数量c2=sqrt(K/r2),B的数量则是K/sqrt(K/r2)=sqrt(K*r2)
+
+我们现在开始计算r1价格提供流动性，r2价格撤回流动性的impermenant loss
+r2价格撤回时，我们可以得到的A的数量是 sqrt(K/r2),B的数量是sqrt(K*r2),总价值是 V2=r2*B*sqrt(K/r2)+B*sqrt(K*r2)=2*B*sqrt(K*r2)
+而如果当时不去提供流动性，此时总价值是 V1=r2*B*sqrt(K/r1)+B*sqrt(K*r1)
+那么当前价值相对于不去提供流动性的变化率是(V2-V1)/V1=V2/V1 - 1
+代入V1 V2得到 2*B*sqrt(K*r2)/(r2*B*sqrt(K/r1)+B*sqrt(K*r1)) - 1
+=> 2*sqrt(K*r2)/(r2*sqrt(K/r1)+sqrt(K*r1)) - 1
+=> 2*sqrt(r2)/(r2*sqrt(1/r1)+sqrt(r1)) - 1
+令price_ratio=r2/r1，那么r2=price_ratio*r1，代入
+=> 2*sqrt(price_ratio*r1)/(price_ratio*r1*sqrt(1/r1)+sqrt(r1)) - 1
+=> 2*sqrt(price_ratio*r1)/(price_ratio*sqrt(r1)+sqrt(r1))-1
+=> 2*sqrt(price_ratio)/(1+price_ratio) - 1
+
+再想想，这次计算是选择以B为计价单元的，价格变化率是price_ratio，那么如果当时选择A为计价单元，价格变化率就是1/price_ratio了；
+price_ratio=(A2/B2)/(A1/B1)
+=>1/price_ratio=(A1/B1)/(A2/B2)=(B2/A2)/(B1/A1)
+
+照理说不管选哪个为计价单元，impermenantloss应该都一样，我们把1/price_ratio代入公式，算出来的结果应该还是一样的
+2*sqrt(1/price_ratio)/(1+1/price_ratio) - 1
+=>2*sqrt(1/price_ratio)/((price_ratio+1)/price_ratio) - 1
+=>2*sqrt(price_ratio)/(1+price_ratio) - 1
+果然还是同样的结果。
